@@ -546,7 +546,7 @@ func TestContext2Validate_orphans(t *testing.T) {
 	p.ValidateResourceTypeConfigFn = func(req providers.ValidateResourceTypeConfigRequest) providers.ValidateResourceTypeConfigResponse {
 		var diags tfdiags.Diagnostics
 		if req.Config.GetAttr("foo").IsNull() {
-			diags.Append(errors.New("foo is not set"))
+			diags = diags.Append(errors.New("foo is not set"))
 		}
 		return providers.ValidateResourceTypeConfigResponse{
 			Diagnostics: diags,
@@ -810,7 +810,7 @@ func TestContext2Validate_provisionerConfig_good(t *testing.T) {
 	pr.ValidateProvisionerConfigFn = func(req provisioners.ValidateProvisionerConfigRequest) provisioners.ValidateProvisionerConfigResponse {
 		var diags tfdiags.Diagnostics
 		if req.Config.GetAttr("test_string").IsNull() {
-			diags.Append(errors.New("test_string is not set"))
+			diags = diags.Append(errors.New("test_string is not set"))
 		}
 		return provisioners.ValidateProvisionerConfigResponse{
 			Diagnostics: diags,
@@ -943,7 +943,7 @@ func TestContext2Validate_tainted(t *testing.T) {
 	p.ValidateResourceTypeConfigFn = func(req providers.ValidateResourceTypeConfigRequest) providers.ValidateResourceTypeConfigResponse {
 		var diags tfdiags.Diagnostics
 		if req.Config.GetAttr("foo").IsNull() {
-			diags.Append(errors.New("foo is not set"))
+			diags = diags.Append(errors.New("foo is not set"))
 		}
 		return providers.ValidateResourceTypeConfigResponse{
 			Diagnostics: diags,
@@ -1128,6 +1128,71 @@ func TestContext2Validate_interpolateMap(t *testing.T) {
 	diags := ctx.Validate()
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
+	}
+}
+
+func TestContext2Validate_varSensitive(t *testing.T) {
+	// Smoke test through validate where a variable has sensitive applied
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+variable "foo" {
+  default = "xyz"
+  sensitive = true
+}
+
+variable "bar" {
+  sensitive = true
+}
+
+data "aws_data_source" "bar" {
+  foo = var.bar
+}
+
+resource "aws_instance" "foo" {
+  foo = var.foo
+}
+`,
+	})
+
+	p := testProvider("aws")
+	p.ValidateResourceTypeConfigFn = func(req providers.ValidateResourceTypeConfigRequest) providers.ValidateResourceTypeConfigResponse {
+		// Providers receive unmarked values
+		if got, want := req.Config.GetAttr("foo"), cty.UnknownVal(cty.String); !got.RawEquals(want) {
+			t.Fatalf("wrong value for foo\ngot:  %#v\nwant: %#v", got, want)
+		}
+		return providers.ValidateResourceTypeConfigResponse{}
+	}
+	p.ValidateDataSourceConfigFn = func(req providers.ValidateDataSourceConfigRequest) (resp providers.ValidateDataSourceConfigResponse) {
+		if got, want := req.Config.GetAttr("foo"), cty.UnknownVal(cty.String); !got.RawEquals(want) {
+			t.Fatalf("wrong value for foo\ngot:  %#v\nwant: %#v", got, want)
+		}
+		return providers.ValidateDataSourceConfigResponse{}
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("aws"): testProviderFuncFixed(p),
+		},
+		Variables: InputValues{
+			"bar": &InputValue{
+				Value:      cty.StringVal("boop"),
+				SourceType: ValueFromCaller,
+			},
+		},
+	})
+
+	diags := ctx.Validate()
+	if diags.HasErrors() {
+		t.Fatal(diags.Err())
+	}
+
+	if !p.ValidateResourceTypeConfigCalled {
+		t.Fatal("expected ValidateResourceTypeConfigFn to be called")
+	}
+
+	if !p.ValidateDataSourceConfigCalled {
+		t.Fatal("expected ValidateDataSourceConfigFn to be called")
 	}
 }
 
